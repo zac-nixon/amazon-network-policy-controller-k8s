@@ -4,7 +4,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-// NewConfigMapStore constructs new conversionStore
+// NewConfigMapStore constructs new conversionStore. Changes are signalled on notifyChan without
+// blocking: give it a buffer of one, and a signal is pending whenever the store changed since the
+// listener last read it.
 func NewConfigMapStore(notifyChan chan<- struct{}) *ConfigMapStore {
 	return &ConfigMapStore{
 		store:         cache.NewStore(cache.MetaNamespaceKeyFunc),
@@ -19,12 +21,21 @@ type ConfigMapStore struct {
 	notifyChannel chan<- struct{}
 }
 
+// notify signals a change without waiting for the listener, which may have stopped reading. A
+// signal already pending covers this one, since the listener rereads the store when it wakes.
+func (s *ConfigMapStore) notify() {
+	select {
+	case s.notifyChannel <- struct{}{}:
+	default:
+	}
+}
+
 // Add adds the given object to the accumulator associated with the given object's key
 func (s *ConfigMapStore) Add(obj interface{}) error {
 	if err := s.store.Add(obj); err != nil {
 		return err
 	}
-	s.notifyChannel <- struct{}{}
+	s.notify()
 	return nil
 }
 
@@ -33,7 +44,7 @@ func (s *ConfigMapStore) Update(obj interface{}) error {
 	if err := s.store.Update(obj); err != nil {
 		return err
 	}
-	s.notifyChannel <- struct{}{}
+	s.notify()
 	return nil
 }
 
@@ -42,7 +53,7 @@ func (s *ConfigMapStore) Delete(obj interface{}) error {
 	if err := s.store.Delete(obj); err != nil {
 		return err
 	}
-	s.notifyChannel <- struct{}{}
+	s.notify()
 	return nil
 }
 
