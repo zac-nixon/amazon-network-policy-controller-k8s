@@ -30,7 +30,7 @@ type defaultConfigmapManager struct {
 	resourceRef            types.NamespacedName
 	store                  cache.Store
 	rt                     *cache.Reflector
-	clientSet              *kubernetes.Clientset
+	clientSet              kubernetes.Interface
 	logger                 logr.Logger
 	cancelFn               context.CancelFunc
 	monitorStopChan        chan struct{}
@@ -38,9 +38,10 @@ type defaultConfigmapManager struct {
 	configMapCheckFunction func(*corev1.ConfigMap) bool
 }
 
-func NewConfigmapManager(resourceRef types.NamespacedName, clientSet *kubernetes.Clientset,
+func NewConfigmapManager(resourceRef types.NamespacedName, clientSet kubernetes.Interface,
 	cancelFn context.CancelFunc, configmapCheckFunction func(configMap *corev1.ConfigMap) bool, logger logr.Logger) *defaultConfigmapManager {
-	storeNotifyChan := make(chan struct{})
+	// Buffered so the store can signal without blocking; see k8s.NewConfigMapStore.
+	storeNotifyChan := make(chan struct{}, 1)
 	cmStore := k8s.NewConfigMapStore(storeNotifyChan)
 	return &defaultConfigmapManager{
 		clientSet:              clientSet,
@@ -77,12 +78,16 @@ func (m *defaultConfigmapManager) MonitorConfigMap(ctx context.Context) error {
 		0,
 	)
 	go m.rt.Run(m.monitorStopChan)
-	go m.listenForConfigMapUpdates()
 
-	if _, err := m.setInitialControllerState(); err != nil {
+	// Read the starting state before listening for changes, so the listener never compares a
+	// change against a state not yet known. A change made meanwhile leaves a notification pending,
+	// and the listener checks it against the starting state.
+	if _, err := m.setInitialControllerState(ctx); err != nil {
 		m.logger.Info("Failed to set initial state", "err", err)
+		close(m.monitorStopChan)
 		return err
 	}
+	go m.listenForConfigMapUpdates()
 	return nil
 }
 
@@ -126,13 +131,13 @@ func (m *defaultConfigmapManager) getCurrentEnabledConfig() (bool, error) {
 }
 
 // setInitialControllerState sets the initial state of the policy controller based on the configmap
-func (m *defaultConfigmapManager) setInitialControllerState() (retVal bool, err error) {
+func (m *defaultConfigmapManager) setInitialControllerState(ctx context.Context) (retVal bool, err error) {
 	defer func() {
 		m.logger.V(1).Info("setInitialControllerState", "retVal", retVal, "err", err)
 		m.initialState = retVal
 	}()
 	// Wait for cache sync
-	if !cache.WaitForCacheSync(m.monitorStopChan, func() bool {
+	if !cache.WaitForCacheSync(ctx.Done(), func() bool {
 		return m.rt.LastSyncResourceVersion() != ""
 	}) {
 		return false, errors.New("failed to sync configmap cache")
