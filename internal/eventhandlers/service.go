@@ -95,8 +95,8 @@ func (h *enqueueRequestForServiceEvent) enqueueReferredPolicies(ctx context.Cont
 	for i := range referredPolicies {
 		policy := &referredPolicies[i]
 		h.logger.V(1).Info("Enqueue policies from service reference", "policy", k8s.NamespacedName(policy), "svc", k8s.NamespacedName(svc))
-		h.policyEventChan <- event.GenericEvent{
-			Object: policy,
+		if !sendPolicyEvent(ctx, h.policyEventChan, policy) {
+			return
 		}
 	}
 
@@ -108,8 +108,8 @@ func (h *enqueueRequestForServiceEvent) enqueueReferredPolicies(ctx context.Cont
 	for i := range referredANPs {
 		anp := &referredANPs[i]
 		h.logger.V(1).Info("Enqueue ANPs from service reference", "anp", k8s.NamespacedName(anp), "svc", k8s.NamespacedName(svc))
-		h.policyEventChan <- event.GenericEvent{
-			Object: anp,
+		if !sendPolicyEvent(ctx, h.policyEventChan, anp) {
+			return
 		}
 	}
 
@@ -122,8 +122,8 @@ func (h *enqueueRequestForServiceEvent) enqueueReferredPolicies(ctx context.Cont
 	for i := range referredClusterPolicies {
 		cnp := &referredClusterPolicies[i]
 		h.logger.V(1).Info("Enqueue CNP from service reference", "cnp", cnp.Name, "svc", k8s.NamespacedName(svc))
-		h.policyEventChan <- event.GenericEvent{
-			Object: cnp,
+		if !sendPolicyEvent(ctx, h.policyEventChan, cnp) {
+			return
 		}
 	}
 }

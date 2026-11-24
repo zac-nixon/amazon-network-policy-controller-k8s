@@ -103,8 +103,8 @@ func (h *enqueueRequestForPodEvent) enqueueReferredPolicies(ctx context.Context,
 	for i := range referredPolicies {
 		policy := &referredPolicies[i]
 		h.logger.V(1).Info("Enqueue from pod reference", "policy", k8s.NamespacedName(policy), "pod", k8s.NamespacedName(pod))
-		h.policyEventChan <- event.GenericEvent{
-			Object: policy,
+		if !sendPolicyEvent(ctx, h.policyEventChan, policy) {
+			return
 		}
 	}
 
@@ -117,8 +117,8 @@ func (h *enqueueRequestForPodEvent) enqueueReferredPolicies(ctx context.Context,
 	for i := range referredANPs {
 		anp := &referredANPs[i]
 		h.logger.V(1).Info("Enqueue ANPs from pod reference", "anp", k8s.NamespacedName(anp), "pod", k8s.NamespacedName(pod))
-		h.policyEventChan <- event.GenericEvent{
-			Object: anp,
+		if !sendPolicyEvent(ctx, h.policyEventChan, anp) {
+			return
 		}
 	}
 
@@ -131,8 +131,8 @@ func (h *enqueueRequestForPodEvent) enqueueReferredPolicies(ctx context.Context,
 	for i := range referredClusterPolicies {
 		cnp := &referredClusterPolicies[i]
 		h.logger.V(1).Info("Enqueue CNP from pod reference", "cnp", cnp.Name, "pod", k8s.NamespacedName(pod))
-		h.policyEventChan <- event.GenericEvent{
-			Object: cnp,
+		if !sendPolicyEvent(ctx, h.policyEventChan, cnp) {
+			return
 		}
 	}
 }
