@@ -40,6 +40,20 @@ import (
 
 var setupLog = ctrl.Log.WithName("setup")
 
+// Run's timing, in variables so tests can shorten it.
+var (
+	// maxTimeWithoutManager is how long /healthz stays healthy while no controller manager is
+	// running: long enough to cover building a new one, short enough that a setup that never
+	// finishes is reported unhealthy and the controller is restarted.
+	maxTimeWithoutManager = 2 * time.Minute
+	// Restarts that follow a manager that ran less than restartBackoffResetAfter wait, starting at
+	// restartBackoffBase and doubling up to restartBackoffMax, so a ConfigMap flipping back and forth
+	// does not rebuild the manager, and relist every watched object, back to back.
+	restartBackoffBase       = time.Second
+	restartBackoffMax        = time.Minute
+	restartBackoffResetAfter = 5 * time.Minute
+)
+
 // Dependencies are the parts of Run that reach the cluster, kept separate so tests can replace them.
 type Dependencies struct {
 	RestConfig *rest.Config
@@ -87,14 +101,16 @@ func Run(ctx context.Context, controllerCFG config.ControllerConfig, deps Depend
 	setupLog.Info("Checking args for policy batch time", "NPBatchTime", controllerCFG.PodUpdateBatchPeriodDuration)
 	setupLog.Info("Checking args for reconciler count", "ReconcilerCount", controllerCFG.MaxConcurrentReconciles)
 
-	probes := &probeServer{}
+	probes := newProbeServer()
 	stopProbes, err := probes.serve(controllerCFG.RuntimeConfig.HealthProbeBindAddress)
 	if err != nil {
 		return fmt.Errorf("unable to start health probe server: %w", err)
 	}
 	defer stopProbes()
 
+	var backoff time.Duration
 	for {
+		started := time.Now()
 		if err := runManager(ctx, controllerCFG, deps, probes); err != nil {
 			return err
 		}
@@ -102,8 +118,24 @@ func Run(ctx context.Context, controllerCFG config.ControllerConfig, deps Depend
 			setupLog.Info("controller manager stopped")
 			return nil
 		}
-		setupLog.Info("Restarting controller manager")
+		backoff = nextRestartBackoff(backoff, time.Since(started))
+		setupLog.Info("Restarting controller manager", "after", backoff)
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			setupLog.Info("controller manager stopped")
+			return nil
+		}
 	}
+}
+
+// nextRestartBackoff returns how long to wait before building the next manager, given the last
+// wait and how long the manager that just stopped ran.
+func nextRestartBackoff(last, ran time.Duration) time.Duration {
+	if ran >= restartBackoffResetAfter {
+		return 0
+	}
+	return min(max(2*last, restartBackoffBase), restartBackoffMax)
 }
 
 // runManager runs one controller manager until ctx is cancelled or the controller needs to start
@@ -114,13 +146,28 @@ func runManager(ctx context.Context, controllerCFG config.ControllerConfig, deps
 	ctx, restart := context.WithCancel(ctx)
 	defer restart()
 
+	// setupFailed passes on a setup step's error, unless the step failed because ctx was cancelled
+	// under it. That is a ConfigMap change or CRD deletion asking for another manager, or shutdown,
+	// and Run tells them apart. A step that fails on its own still stops the controller.
+	setupFailed := func(err error) error {
+		if ctx.Err() != nil {
+			setupLog.Info("Controller manager setup interrupted", "err", err)
+			return nil
+		}
+		return err
+	}
+
+	// The gauges counting policies belong to the manager that reconciles them, and a new process
+	// used to start without any. Every manager before this one has stopped.
+	metrics.ResetPolicyPopulation()
+
 	enableNetworkPolicyController := true
 	if controllerCFG.EnableConfigMapCheck {
 		setupLog.Info("Enable network policy controller based on configuration", "configmap", configmap.GetControllerConfigMapId())
 		configMapManager := config.NewConfigmapManager(configmap.GetControllerConfigMapId(),
 			deps.ClientSet, restart, configmap.GetConfigmapCheckFn(), ctrl.Log.WithName("configmap-manager"))
 		if err := configMapManager.MonitorConfigMap(ctx); err != nil {
-			return fmt.Errorf("unable to monitor configmap for checking if controller is enabled: %w", err)
+			return setupFailed(fmt.Errorf("unable to monitor configmap for checking if controller is enabled: %w", err))
 		}
 		enableNetworkPolicyController = configMapManager.IsControllerEnabled()
 		if !enableNetworkPolicyController {
@@ -131,7 +178,7 @@ func runManager(ctx context.Context, controllerCFG config.ControllerConfig, deps
 
 	crdManager := deps.NewCRDManager(restart)
 	if err := crdManager.Start(ctx); err != nil {
-		return fmt.Errorf("unable to ensure CRDs exist: %w", err)
+		return setupFailed(fmt.Errorf("unable to ensure CRDs exist: %w", err))
 	}
 	rtOpts := config.BuildRuntimeOptions(controllerCFG.RuntimeConfig, deps.Scheme)
 	// Run serves the probes, so that they outlive this manager.
@@ -150,7 +197,7 @@ func runManager(ctx context.Context, controllerCFG config.ControllerConfig, deps
 	if enableNetworkPolicyController {
 		setupLog.Info("Network Policy controller is enabled, starting watches")
 		if err := deps.SetupPolicyController(ctx, mgr); err != nil {
-			return fmt.Errorf("unable to setup network policy controller: %w", err)
+			return setupFailed(fmt.Errorf("unable to setup network policy controller: %w", err))
 		}
 	}
 
@@ -166,7 +213,14 @@ func runManager(ctx context.Context, controllerCFG config.ControllerConfig, deps
 	// Initialize metrics after manager cache is ready
 	// only if network policy controller is enabled
 	if enableNetworkPolicyController {
+		initDone := make(chan struct{})
+		// Wait for the counters to stop being written before the next manager resets them.
+		defer func() {
+			restart()
+			<-initDone
+		}()
 		go func() {
+			defer close(initDone)
 			select {
 			case <-mgr.Elected():
 			case <-ctx.Done():
@@ -192,8 +246,8 @@ func runManager(ctx context.Context, controllerCFG config.ControllerConfig, deps
 		}()
 	}
 
-	probes.setChecks(mgr.checks())
-	defer probes.setChecks(nil, nil)
+	probes.managerRunning(mgr.checks())
+	defer probes.managerStopped()
 	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("problem running controller manager: %w", err)
 	}

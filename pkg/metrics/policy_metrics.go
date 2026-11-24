@@ -99,6 +99,18 @@ func ForgetPolicyTargetGroups(policy types.NamespacedName) {
 	refreshSplitPolicyGaugesLocked()
 }
 
+// ResetPolicyPopulation forgets every policy the gauges count, for a controller that starts over
+// and will count them again. The cumulative reconcile counters and latency histograms keep their values.
+func ResetPolicyPopulation() {
+	splitPolicies.Lock()
+	defer splitPolicies.Unlock()
+
+	clear(splitPolicies.counts)
+	refreshSplitPolicyGaugesLocked()
+	PolicyObjectCount.Reset()
+	AdvancedNetworkPolicyEnabled.Set(0)
+}
+
 func refreshSplitPolicyGaugesLocked() {
 	max := 0
 	for _, groups := range splitPolicies.counts {

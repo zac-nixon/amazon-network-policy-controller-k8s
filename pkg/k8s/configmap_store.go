@@ -78,8 +78,14 @@ func (s *ConfigMapStore) GetByKey(key string) (item interface{}, exists bool, er
 }
 
 // Replace will delete the contents of the store, using instead the given list.
+// Replace will delete the contents of the store, using instead the given list. A relist after the
+// watch expires comes through here, so it notifies like any other change.
 func (s *ConfigMapStore) Replace(list []interface{}, resourceVersion string) error {
-	return s.store.Replace(list, resourceVersion)
+	if err := s.store.Replace(list, resourceVersion); err != nil {
+		return err
+	}
+	s.notify()
+	return nil
 }
 
 // Resync invokes the cache.store Resync method

@@ -80,8 +80,8 @@ func (h *enqueueRequestForNamespaceEvent) enqueueReferredPolicies(ctx context.Co
 	for i := range referredPolicies {
 		policy := &referredPolicies[i]
 		h.logger.V(1).Info("Enqueue from namespace reference", "policy", k8s.NamespacedName(policy), "namespace", k8s.NamespacedName(ns))
-		h.policyEventChan <- event.GenericEvent{
-			Object: policy,
+		if !sendPolicyEvent(ctx, h.policyEventChan, policy) {
+			return
 		}
 	}
 
@@ -94,8 +94,8 @@ func (h *enqueueRequestForNamespaceEvent) enqueueReferredPolicies(ctx context.Co
 	for i := range referredANPs {
 		anp := &referredANPs[i]
 		h.logger.V(1).Info("Enqueue ANPs from namespace reference", "anp", k8s.NamespacedName(anp), "namespace", k8s.NamespacedName(ns))
-		h.policyEventChan <- event.GenericEvent{
-			Object: anp,
+		if !sendPolicyEvent(ctx, h.policyEventChan, anp) {
+			return
 		}
 	}
 
@@ -108,8 +108,8 @@ func (h *enqueueRequestForNamespaceEvent) enqueueReferredPolicies(ctx context.Co
 	for i := range referredClusterPolicies {
 		cnp := &referredClusterPolicies[i]
 		h.logger.V(1).Info("Enqueue CNP from namespace reference", "cnp", cnp.Name, "namespace", k8s.NamespacedName(ns))
-		h.policyEventChan <- event.GenericEvent{
-			Object: cnp,
+		if !sendPolicyEvent(ctx, h.policyEventChan, cnp) {
+			return
 		}
 	}
 }

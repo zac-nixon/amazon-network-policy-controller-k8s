@@ -35,20 +35,69 @@ import (
 // manager would go away each time. The EKS health check starts probing the moment the ConfigMap
 // turns the controller on, so it would see that gap as an unhealthy controller.
 //
-// It serves the checks of the manager that is running. Between managers it has none, and the
-// aggregate endpoints report healthy.
+// It serves the checks of the manager that is running. While none is, before the first or between
+// two, it serves a single check named noManagerCheck instead: /readyz fails, and /healthz passes
+// until no manager has run for maxTimeWithoutManager.
 type probeServer struct {
 	mu      sync.RWMutex
-	healthz map[string]healthz.Checker
-	readyz  map[string]healthz.Checker
+	running bool
+	// idleSince is when the last manager stopped, or when the server was made if none has run.
+	idleSince time.Time
+	healthz   map[string]healthz.Checker
+	readyz    map[string]healthz.Checker
 }
 
-// setChecks replaces the checks being served. The maps are copied, so callers may reuse theirs.
-func (p *probeServer) setChecks(healthzChecks, readyzChecks map[string]healthz.Checker) {
+const noManagerCheck = "controller-manager"
+
+var errNoManager = errors.New("no controller manager is running")
+
+func newProbeServer() *probeServer {
+	return &probeServer{idleSince: time.Now()}
+}
+
+// managerRunning serves a manager's checks. The maps are copied, so callers may reuse theirs.
+func (p *probeServer) managerRunning(healthzChecks, readyzChecks map[string]healthz.Checker) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.running = true
 	p.healthz = maps.Clone(healthzChecks)
 	p.readyz = maps.Clone(readyzChecks)
+}
+
+// managerStopped stops serving the manager's checks.
+func (p *probeServer) managerStopped() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.running = false
+	p.idleSince = time.Now()
+	p.healthz = nil
+	p.readyz = nil
+}
+
+// healthzChecks returns the checks /healthz serves now. Like readyzChecks, it never returns a map
+// that is written to later, so callers may read it without the lock.
+func (p *probeServer) healthzChecks() map[string]healthz.Checker {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.running {
+		return p.healthz
+	}
+	idleSince := p.idleSince
+	return map[string]healthz.Checker{noManagerCheck: func(*http.Request) error {
+		if idle := time.Since(idleSince); idle > maxTimeWithoutManager {
+			return fmt.Errorf("%w for %s", errNoManager, idle.Round(time.Second))
+		}
+		return nil
+	}}
+}
+
+func (p *probeServer) readyzChecks() map[string]healthz.Checker {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.running {
+		return p.readyz
+	}
+	return map[string]healthz.Checker{noManagerCheck: func(*http.Request) error { return errNoManager }}
 }
 
 // handler routes the endpoints the way the controller-runtime manager does, including a subpath
@@ -56,15 +105,11 @@ func (p *probeServer) setChecks(healthzChecks, readyzChecks map[string]healthz.C
 func (p *probeServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	for endpoint, checks := range map[string]func() map[string]healthz.Checker{
-		"/healthz": func() map[string]healthz.Checker { return p.healthz },
-		"/readyz":  func() map[string]healthz.Checker { return p.readyz },
+		"/healthz": p.healthzChecks,
+		"/readyz":  p.readyzChecks,
 	} {
 		h := http.StripPrefix(endpoint, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// setChecks swaps the maps rather than writing into them, so the one read here stays intact.
-			p.mu.RLock()
-			current := checks()
-			p.mu.RUnlock()
-			(&healthz.Handler{Checks: current}).ServeHTTP(w, r)
+			(&healthz.Handler{Checks: checks()}).ServeHTTP(w, r)
 		}))
 		mux.Handle(endpoint, h)
 		mux.Handle(endpoint+"/", h)

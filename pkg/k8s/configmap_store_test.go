@@ -30,3 +30,15 @@ func TestConfigMapStore_NotifiesWithoutBlockingOnAStoppedListener(t *testing.T) 
 	g.Expect(notify).To(Receive())
 	g.Expect(notify).NotTo(Receive())
 }
+
+// A reflector that relists, after its watch expires, hands the store the whole list through
+// Replace. A toggle made while it was not watching only shows up there, so Replace must notify.
+func TestConfigMapStore_ReplaceNotifies(t *testing.T) {
+	g := NewWithT(t)
+	notify := make(chan struct{}, 1)
+	store := NewConfigMapStore(notify)
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system", Name: "amazon-vpc-cni"}}
+
+	g.Expect(store.Replace([]interface{}{cm}, "2")).To(Succeed())
+	g.Expect(notify).To(Receive())
+}
